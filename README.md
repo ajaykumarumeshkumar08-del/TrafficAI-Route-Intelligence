@@ -1,4 +1,4 @@
-# 🚦 TrafficAI — Route Traffic Intelligence
+# TrafficAI — Route Traffic Intelligence
 
 TrafficAI is a Python-based web application that helps users
 search for locations, calculate driving routes, and review
@@ -7,7 +7,7 @@ traffic-aware travel estimates.
 The project also includes a separate Machine Learning demo
 that analyses historical traffic patterns.
 
-## ✨ Features
+## Features
 
 - Search starting locations and destinations
 - Select the correct place from search results
@@ -19,7 +19,7 @@ that analyses historical traffic patterns.
 - Explore historical traffic analytics
 - Demonstrate a Random Forest traffic-volume prediction model
 
-## 🛠️ Technologies Used
+## Technologies Used
 
 - Python
 - Streamlit
@@ -31,7 +31,7 @@ that analyses historical traffic patterns.
 - TomTom Search and Routing APIs
 - OpenStreetMap map tiles
 
-## 📂 Project Structure
+## Project Structure
 
 ```text
 AI-Traffic-Predictor/
