@@ -42,11 +42,11 @@ AI-Traffic-Predictor/
 ├── .gitignore
 ├── data/
 │   └── Metro_Interstate_Traffic_Volume.csv.gz
-├── model/
-│   └── traffic_model.pkl
-└── .streamlit/
-    └── secrets.toml
-    ## Train the Machine Learning Model
+└── model/
+    └── traffic_model.pkl (generated locally)
+```
+
+## Train the Machine Learning Model
 
 The trained model file is excluded from GitHub because it exceeds
 GitHub's standard file-size limit.
@@ -55,3 +55,4 @@ After installing the dependencies, run:
 
 ```powershell
 python train_model.py
+```

@@ -1,20 +1,16 @@
-
 import os
+import pickle
 from datetime import date, datetime, time
 from urllib.parse import quote
 
 import folium
 import pandas as pd
-import pickle
 import requests
 import streamlit as st
 from streamlit_folium import st_folium
 
 
-# =====================================================
 # PAGE CONFIGURATION
-# =====================================================
-
 st.set_page_config(
     page_title="TrafficAI | Route Intelligence",
     page_icon="🚦",
@@ -23,10 +19,7 @@ st.set_page_config(
 )
 
 
-# =====================================================
 # API KEY
-# =====================================================
-
 def get_api_key():
     try:
         return st.secrets["TOMTOM_API_KEY"]
@@ -34,16 +27,9 @@ def get_api_key():
         return os.getenv("TOMTOM_API_KEY", "")
 
 
-# =====================================================
 # TOMTOM API HELPER
-# =====================================================
-
 def get_json(url, params):
-    response = requests.get(
-        url,
-        params=params,
-        timeout=25,
-    )
+    response = requests.get(url, params=params, timeout=25)
 
     try:
         data = response.json()
@@ -51,22 +37,17 @@ def get_json(url, params):
         data = {}
 
     if not response.ok:
-        detail = data.get("errorText") or data.get("message")
-
-        if not detail:
-            detail = "Please check API access and request parameters."
-
-        raise RuntimeError(
-            f"API error {response.status_code}: {detail}"
+        detail = (
+            data.get("errorText")
+            or data.get("message")
+            or "Check API access and request parameters."
         )
+        raise RuntimeError(f"API error {response.status_code}: {detail}")
 
     return data
 
 
-# =====================================================
 # LOCATION SEARCH
-# =====================================================
-
 def search_locations(query, api_key):
     url = (
         "https://api.tomtom.com/search/2/search/"
@@ -80,7 +61,6 @@ def search_locations(query, api_key):
             "key": api_key,
             "countrySet": "IN",
             "limit": 5,
-           
         },
     )
 
@@ -101,9 +81,7 @@ def search_locations(query, api_key):
                     or address.get("freeformAddress")
                     or query
                 ),
-                "address": address.get(
-                    "freeformAddress", query
-                ),
+                "address": address.get("freeformAddress", query),
                 "lat": float(position["lat"]),
                 "lon": float(position["lon"]),
             }
@@ -118,11 +96,13 @@ def search_locations(query, api_key):
     return candidates
 
 
-# =====================================================
 # ROUTE CALCULATION
-# =====================================================
-
-def calculate_route(origin, destination, departure):
+def calculate_route(
+    origin,
+    destination,
+    departure,
+    travel_mode="car",
+):
     locations = (
         f"{origin['lat']},{origin['lon']}:"
         f"{destination['lat']},{destination['lon']}"
@@ -139,24 +119,39 @@ def calculate_route(origin, destination, departure):
             "key": get_api_key(),
             "traffic": "true",
             "routeType": "fastest",
-            "travelMode": "car",
+            "travelMode": travel_mode,
             "departAt": departure,
             "computeTravelTimeFor": "all",
+            "sectionType": "travelMode",
         },
     )
 
     routes = data.get("routes", [])
 
     if not routes:
-        raise ValueError("No driving route was returned.")
+        raise ValueError(
+            f"No {travel_mode} route was returned. "
+            "Try another transport mode or location."
+        )
 
     return routes[0]
 
 
-# =====================================================
-# DISPLAY HELPERS
-# =====================================================
+# CHECK WHICH MODE TOMTOM ACTUALLY REPORTED
+def get_effective_route_modes(route):
+    modes = set()
 
+    for section in route.get("sections", []):
+        if str(section.get("sectionType", "")).upper() == "TRAVEL_MODE":
+            mode = section.get("travelMode")
+
+            if mode:
+                modes.add(str(mode).lower())
+
+    return sorted(modes)
+
+
+# DISPLAY HELPERS
 def format_duration(seconds):
     if seconds is None:
         return "Unavailable"
@@ -180,8 +175,7 @@ def traffic_status(delay, free_flow_time):
         else 0
     )
 
-    # Project-defined display bands, not official
-    # traffic-authority classifications.
+    # Project-defined display bands, not official classifications.
     if delay >= 600 or ratio >= 0.20:
         return "HIGH", "🔴"
 
@@ -204,15 +198,20 @@ def show_hero(title, subtitle):
     )
 
 
-def show_route_map(origin, destination, route, map_key):
+# ROUTE MAP
+def show_route_map(
+    origin,
+    destination,
+    route,
+    map_key,
+    transport_label,
+    travel_mode,
+):
     points = []
 
     for leg in route.get("legs", []):
         for point in leg.get("points", []):
-            if (
-                "latitude" in point
-                and "longitude" in point
-            ):
+            if "latitude" in point and "longitude" in point:
                 points.append(
                     [
                         float(point["latitude"]),
@@ -255,12 +254,18 @@ def show_route_map(origin, destination, route, map_key):
     ).add_to(route_map)
 
     if points:
+        colors = {
+            "car": "#0D9488",
+            "motorcycle": "#F59E0B",
+            "bus": "#2563EB",
+        }
+
         folium.PolyLine(
             points,
-            color="#0D9488",
+            color=colors.get(travel_mode, "#0D9488"),
             weight=6,
             opacity=0.9,
-            tooltip="Calculated driving route",
+            tooltip=f"Calculated {transport_label} road route",
         ).add_to(route_map)
 
         route_map.fit_bounds(points)
@@ -288,10 +293,7 @@ def show_route_map(origin, destination, route, map_key):
         )
 
 
-# =====================================================
 # HISTORICAL DATA HELPERS
-# =====================================================
-
 @st.cache_data
 def load_historical_data():
     path = "data/Metro_Interstate_Traffic_Volume.csv.gz"
@@ -299,17 +301,14 @@ def load_historical_data():
     if not os.path.exists(path):
         return None
 
-    df = pd.read_csv(
-        path,
-        compression="gzip",
-    )
-
+    df = pd.read_csv(path, compression="gzip")
     df["date_time"] = pd.to_datetime(
-        df["date_time"], errors="coerce"
+        df["date_time"],
+        errors="coerce",
     )
-
     df["traffic_volume"] = pd.to_numeric(
-        df["traffic_volume"], errors="coerce"
+        df["traffic_volume"],
+        errors="coerce",
     )
 
     df = df.dropna(
@@ -329,10 +328,7 @@ def load_ml_model():
         return pickle.load(file)
 
 
-# =====================================================
 # PROFESSIONAL DESIGN
-# =====================================================
-
 st.markdown(
     """
     <style>
@@ -410,22 +406,15 @@ st.markdown(
 )
 
 
-# =====================================================
 # INITIAL SESSION STATE
-# =====================================================
-
 st.session_state.setdefault("route_history", [])
 st.session_state.setdefault("route_result", None)
 
 
-# =====================================================
 # SIDEBAR
-# =====================================================
-
 with st.sidebar:
     st.markdown("## 🚦 TrafficAI")
     st.caption("ROUTE INTELLIGENCE")
-
     st.divider()
 
     page = st.radio(
@@ -440,27 +429,19 @@ with st.sidebar:
     )
 
     st.divider()
-
     st.caption("ROUTING SERVICE")
     st.write("TomTom Routing API")
-
     st.caption("MAP")
     st.write("OpenStreetMap")
-
     st.divider()
-
     st.caption("AI / Software Mini Project")
 
 
 api_key = get_api_key()
 
 
-# =====================================================
-# DASHBOARD PAGE
-# =====================================================
-
+# DASHBOARD
 if page == "Dashboard":
-
     show_hero(
         "TrafficAI Dashboard",
         "Plan journeys and review route traffic estimates.",
@@ -468,16 +449,13 @@ if page == "Dashboard":
 
     st.info(
         "Enter a start location and destination in Route Planner "
-        "to calculate a traffic-aware driving route."
+        "to calculate a route for your selected transport mode."
     )
 
     history = st.session_state.route_history
-
-    total_routes = len(history)
-
     a, b, c = st.columns(3)
 
-    a.metric("Route Checks", total_routes)
+    a.metric("Route Checks", len(history))
 
     if history:
         latest = history[-1]
@@ -486,34 +464,28 @@ if page == "Dashboard":
             "Latest Route Distance",
             f"{latest['Distance (km)']:.1f} km",
         )
-
         c.metric(
             "Latest Travel Time",
             latest["Travel Time"],
         )
 
         st.divider()
-
         st.subheader("Latest Journey")
-
         st.write(f"**From:** {latest['Origin']}")
         st.write(f"**To:** {latest['Destination']}")
-
-        st.caption(
-            "Use Route Planner to calculate another journey."
-        )
+        st.write(f"**Transport:** {latest.get('Transport', 'Car')}")
+        st.caption("Use Route Planner to calculate another journey.")
 
     else:
         b.metric("Routes Calculated", 0)
         c.metric("Traffic Status", "Not checked")
-
         st.subheader("Get Started")
 
         st.write(
             "1. Open Route Planner.\n"
             "2. Enter the starting point and destination.\n"
             "3. Select the correct search result for each place.\n"
-            "4. Choose the departure time and calculate the route."
+            "4. Choose transport and departure time, then calculate the route."
         )
 
     st.caption(
@@ -522,35 +494,27 @@ if page == "Dashboard":
     )
 
 
-# =====================================================
 # ROUTE PLANNER
-# =====================================================
-
 elif page == "Route Planner":
-
     show_hero(
         "Plan Your Journey",
-        "Find locations, calculate driving routes, "
-        "and review traffic-aware travel estimates.",
+        "Find locations and compare road-route estimates for car, bike, and bus.",
     )
 
     st.info(
-        "Location search and route calculations use TomTom. "
-        "Select the correct result for both locations before "
-        "calculating a route."
+        "TomTom calculates the selected road route. Bike uses motorcycle "
+        "routing. Bus means a bus-vehicle road route, not public bus numbers, "
+        "stops, or schedules. Availability depends on TomTom coverage."
     )
 
     if not api_key:
         st.error(
-            "TomTom API key is missing. "
-            "Check .streamlit/secrets.toml."
+            "TomTom API key is missing. Check .streamlit/secrets.toml."
         )
 
     st.subheader("📍 Journey Details")
 
-    # First form: search both locations
     with st.form("location_search_form"):
-
         col1, col2 = st.columns(2)
 
         with col1:
@@ -572,17 +536,18 @@ elif page == "Route Planner":
         )
 
     if search_clicked:
+        for key in (
+            "origin_candidates",
+            "destination_candidates",
+            "origin_choice",
+            "destination_choice",
+        ):
+            st.session_state.pop(key, None)
 
-        st.session_state.pop("origin_candidates", None)
-        st.session_state.pop("destination_candidates", None)
-        st.session_state.pop("origin_choice", None)
-        st.session_state.pop("destination_choice", None)
         st.session_state.route_result = None
 
         if not origin_query.strip() or not destination_query.strip():
-            st.error(
-                "Enter both a starting location and a destination."
-            )
+            st.error("Enter both a starting location and a destination.")
 
         elif not api_key:
             st.error(
@@ -592,21 +557,17 @@ elif page == "Route Planner":
         else:
             try:
                 with st.spinner("Searching locations..."):
-
                     origin_results = search_locations(
                         origin_query.strip(),
                         api_key,
                     )
-
                     destination_results = search_locations(
                         destination_query.strip(),
                         api_key,
                     )
 
                 st.session_state.origin_candidates = origin_results
-                st.session_state.destination_candidates = (
-                    destination_results
-                )
+                st.session_state.destination_candidates = destination_results
 
                 st.success(
                     "Locations found. Choose the correct place "
@@ -618,22 +579,16 @@ elif page == "Route Planner":
                 RuntimeError,
                 ValueError,
             ) as error:
-
                 st.error(f"Location search failed: {error}")
 
     origin_results = st.session_state.get("origin_candidates")
-    destination_results = st.session_state.get(
-        "destination_candidates"
-    )
+    destination_results = st.session_state.get("destination_candidates")
 
-    # Second form: explicitly choose the correct place and time
     if origin_results and destination_results:
-
         st.divider()
         st.subheader("✅ Confirm Exact Locations")
 
         with st.form("route_calculation_form"):
-
             left, right = st.columns(2)
 
             with left:
@@ -662,6 +617,24 @@ elif page == "Route Planner":
                     key="destination_choice",
                 )
 
+            st.subheader("🚗 Choose Transport")
+
+            transport_choice = st.radio(
+                "How are you travelling?",
+                ["🚗 Car", "🏍️ Bike", "🚌 Bus"],
+                horizontal=True,
+                key="transport_mode_choice",
+            )
+
+            transport_config = {
+                "🚗 Car": {"mode": "car", "label": "Car"},
+                "🏍️ Bike": {
+                    "mode": "motorcycle",
+                    "label": "Bike",
+                },
+                "🚌 Bus": {"mode": "bus", "label": "Bus"},
+            }
+
             st.subheader("🕒 Departure")
 
             departure_mode = st.radio(
@@ -671,7 +644,6 @@ elif page == "Route Planner":
             )
 
             if departure_mode == "Schedule for later":
-
                 travel_date = st.date_input(
                     "Departure date",
                     value=date.today(),
@@ -691,102 +663,84 @@ elif page == "Route Planner":
             )
 
         if calculate_clicked:
-
             if origin_choice is None or destination_choice is None:
-
                 st.error(
                     "Select one starting place and one destination."
                 )
 
             else:
-
                 origin = origin_results[origin_choice]
-                destination = destination_results[
-                    destination_choice
-                ]
+                destination = destination_results[destination_choice]
 
                 if (
                     origin["lat"] == destination["lat"]
                     and origin["lon"] == destination["lon"]
                 ):
-
                     st.error(
                         "Starting point and destination are the same. "
                         "Please choose two different places."
                     )
 
                 else:
-
                     if departure_mode == "Leave now":
-
                         departure = "now"
                         departure_label = "Leave now"
 
                     else:
-
                         planned = datetime.combine(
                             travel_date,
                             departure_time,
                         )
 
                         if planned <= datetime.now():
-
                             st.error(
                                 "The selected departure time has passed. "
                                 "Choose a future date/time, or select Leave now."
                             )
-
                             departure = None
                             departure_label = None
 
                         else:
-
-                            # TomTom assumes the origin's timezone
-                            # when the timestamp has no UTC offset.
                             departure = planned.isoformat(
                                 timespec="seconds"
                             )
-
                             departure_label = planned.strftime(
                                 "%d %b %Y, %I:%M %p"
                             )
 
                     if departure:
-
                         st.session_state.route_result = None
 
+                        selected = transport_config[transport_choice]
+                        travel_mode = selected["mode"]
+                        transport_label = selected["label"]
+
                         try:
-
                             with st.spinner(
-                                "Calculating route and traffic estimates..."
+                                f"Calculating {transport_label.lower()} "
+                                "route and travel estimates..."
                             ):
-
                                 route = calculate_route(
                                     origin,
                                     destination,
                                     departure,
+                                    travel_mode,
                                 )
 
-                            result = {
+                            st.session_state.route_result = {
                                 "origin": origin,
                                 "destination": destination,
                                 "route": route,
                                 "departure_label": departure_label,
+                                "transport_label": transport_label,
+                                "travel_mode": travel_mode,
                             }
 
-                            st.session_state.route_result = result
-
                             summary = route.get("summary", {})
-
-                            delay = summary.get(
-                                "trafficDelayInSeconds"
-                            )
-
+                            delay = summary.get("trafficDelayInSeconds")
                             distance_km = (
-                                summary.get("lengthInMeters", 0)
-                                / 1000
+                                summary.get("lengthInMeters", 0) / 1000
                             )
-
                             travel_seconds = summary.get(
                                 "travelTimeInSeconds"
                             )
@@ -795,9 +749,8 @@ elif page == "Route Planner":
                                 {
                                     "Origin": origin["address"],
                                     "Destination": destination["address"],
-                                    "Distance (km)": round(
-                                        distance_km, 2
-                                    ),
+                                    "Transport": transport_label,
+                                    "Distance (km)": round(distance_km, 2),
                                     "Travel Time": format_duration(
                                         travel_seconds
                                     ),
@@ -810,72 +763,91 @@ elif page == "Route Planner":
                                 }
                             )
 
-                            st.success(
-                                "Route calculated successfully."
-                            )
+                            st.success("Route calculated successfully.")
 
                         except (
                             requests.RequestException,
                             RuntimeError,
                             ValueError,
                         ) as error:
-
                             st.error(
                                 f"Route calculation failed: {error}"
                             )
 
-    # Display the latest calculated route
+    # DISPLAY ROUTE RESULTS
     result = st.session_state.get("route_result")
 
     if result:
-
         st.divider()
-        st.subheader("📊 Route Results")
+        st.subheader(
+            f"📊 {result['transport_label']} Route Results"
+        )
 
         origin = result["origin"]
         destination = result["destination"]
         route = result["route"]
         summary = route.get("summary", {})
 
-        distance_km = (
-            summary.get("lengthInMeters", 0) / 1000
-        )
+        effective_modes = get_effective_route_modes(route)
+        requested_mode = result["travel_mode"]
 
-        travel_seconds = summary.get(
-            "travelTimeInSeconds"
-        )
+        readable_modes = {
+            "car": "Car",
+            "motorcycle": "Motorcycle/Bike",
+            "bus": "Bus vehicle",
+            "other": "Other / unsupported section",
+        }
 
+        if not effective_modes:
+            st.warning(
+                "TomTom did not return travel-mode confirmation for this "
+                "route. Treat these values as provider estimates, not a "
+                "verified mode-specific comparison."
+            )
+
+        elif (
+            "other" in effective_modes
+            or requested_mode not in effective_modes
+        ):
+            reported = ", ".join(
+                readable_modes.get(mode, mode)
+                for mode in effective_modes
+            )
+            st.warning(
+                f"TomTom could not confirm {result['transport_label']} "
+                f"routing for every section. Reported modes: {reported}. "
+                "Distance and time may not be fully specific to the selected mode."
+            )
+
+        else:
+            reported = ", ".join(
+                readable_modes.get(mode, mode)
+                for mode in effective_modes
+            )
+            st.caption(
+                f"Route mode reported by TomTom: {reported}."
+            )
+
+        distance_km = summary.get("lengthInMeters", 0) / 1000
+        travel_seconds = summary.get("travelTimeInSeconds")
         delay = summary.get("trafficDelayInSeconds")
-
-        free_flow = summary.get(
-            "noTrafficTravelTimeInSeconds"
-        )
-
+        free_flow = summary.get("noTrafficTravelTimeInSeconds")
         historic_time = summary.get(
             "historicTrafficTravelTimeInSeconds"
         )
-
         live_time = summary.get(
             "liveTrafficIncidentsTravelTimeInSeconds"
         )
 
-        level, icon = traffic_status(
-            delay,
-            free_flow,
-        )
+        level, icon = traffic_status(delay, free_flow)
 
         a, b, c, d = st.columns(4)
 
-        a.metric(
-            "Route Distance",
-            f"{distance_km:.1f} km",
-        )
-
+        a.metric("Route Distance", f"{distance_km:.1f} km")
         b.metric(
             "Estimated Travel Time",
             format_duration(travel_seconds),
         )
-
         c.metric(
             "Reported Delay",
             (
@@ -884,67 +856,64 @@ elif page == "Route Planner":
                 else "Unavailable"
             ),
         )
+        d.metric("Delay Classification", f"{icon} {level}")
 
-        d.metric(
-            "Delay Classification",
-            f"{icon} {level}",
-        )
-
-        st.caption(
-            f"Departure: {result['departure_label']}"
-        )
-
+        st.caption(f"Departure: {result['departure_label']}")
         st.write(f"**From:** {origin['address']}")
         st.write(f"**To:** {destination['address']}")
 
-        with st.expander("View detailed travel-time estimates"):
+        if result["travel_mode"] == "bus":
+            st.info(
+                "Bus mode shows a road route calculated for a bus vehicle. "
+                "It does not provide public bus numbers, stops, or schedules."
+            )
 
+        elif result["travel_mode"] == "motorcycle":
+            st.caption(
+                "Bike mode uses TomTom motorcycle routing. It does not "
+                "model riding through traffic gaps; route and time are estimates."
+            )
+
+        with st.expander("View detailed travel-time estimates"):
             details1, details2, details3 = st.columns(3)
 
             details1.metric(
                 "Without Traffic",
                 format_duration(free_flow),
             )
-
             details2.metric(
                 "Historical Traffic",
                 format_duration(historic_time),
             )
-
             details3.metric(
                 "Live Traffic Estimate",
                 format_duration(live_time),
             )
 
             st.caption(
-                "These values are returned by TomTom when available. "
-                "The detailed travel-time estimates can vary by route "
-                "and data coverage."
+                "These values are returned by TomTom when available "
+                "and can vary by route and data coverage."
             )
 
         if level == "HIGH":
-
             st.warning(
                 "The API-reported delay falls in this project's "
                 "high-delay band. Consider allowing extra travel time."
             )
 
         elif level == "MEDIUM":
-
             st.info(
                 "The API-reported delay falls in this project's "
                 "medium-delay band."
             )
 
         elif level == "LOW":
-
             st.success(
                 "The API-reported delay falls in this project's "
                 "low-delay band."
             )
 
         else:
-
             st.info(
                 "The API did not provide enough delay information "
                 "to classify the route."
@@ -963,19 +932,18 @@ elif page == "Route Planner":
             destination,
             route,
             map_key=f"route_map_{len(st.session_state.route_history)}",
+            transport_label=result["transport_label"],
+            travel_mode=result["travel_mode"],
         )
 
         st.caption(
-            "Route estimates by TomTom. Map tiles by OpenStreetMap."
+            "Route estimates by TomTom; map tiles by OpenStreetMap. "
+            "Bus mode is not a public-transit timetable service."
         )
 
 
-# =====================================================
 # RECENT ROUTES
-# =====================================================
-
 elif page == "Recent Routes":
-
     show_hero(
         "Recent Route Checks",
         "Review routes calculated during this browser session.",
@@ -984,7 +952,6 @@ elif page == "Recent Routes":
     history = st.session_state.route_history
 
     if history:
-
         st.dataframe(
             pd.DataFrame(history[::-1]),
             use_container_width=True,
@@ -992,13 +959,11 @@ elif page == "Recent Routes":
         )
 
         if st.button("Clear Recent Routes"):
-
             st.session_state.route_history = []
             st.session_state.route_result = None
             st.rerun()
 
     else:
-
         st.info(
             "No routes calculated yet. "
             "Open Route Planner to check your first journey."
@@ -1010,16 +975,11 @@ elif page == "Recent Routes":
     )
 
 
-# =====================================================
 # HISTORICAL ML DEMO
-# =====================================================
-
 elif page == "Historical ML Demo":
-
     show_hero(
         "Historical ML Demonstration",
-        "A separate Random Forest model trained on historical "
-        "traffic data.",
+        "A separate Random Forest model trained on historical traffic data.",
     )
 
     st.warning(
@@ -1028,32 +988,24 @@ elif page == "Historical ML Demo":
     )
 
     try:
-
         df = load_historical_data()
-        ml_model = load_ml_model()
+        model = load_ml_model()
 
         if df is None:
-
-            st.error(
-                "Historical dataset not found in the data folder."
-            )
+            st.error("Historical dataset not found in the data folder.")
 
         else:
-
             with st.form("ml_demo_form"):
-
                 ml_date = st.date_input(
                     "Date for historical-pattern estimate",
                     value=date.today(),
                     key="ml_date",
                 )
-
                 ml_time = st.time_input(
                     "Time for historical-pattern estimate",
                     value=time(18, 0),
                     key="ml_time",
                 )
-
                 ml_submit = st.form_submit_button(
                     "Predict Historical Traffic",
                     type="primary",
@@ -1061,7 +1013,6 @@ elif page == "Historical ML Demo":
                 )
 
             if ml_submit:
-
                 features = pd.DataFrame(
                     [
                         {
@@ -1074,7 +1025,7 @@ elif page == "Historical ML Demo":
 
                 estimate = max(
                     0,
-                    float(ml_model.predict(features)[0]),
+                    float(model.predict(features)[0]),
                 )
 
                 st.metric(
@@ -1083,74 +1034,58 @@ elif page == "Historical ML Demo":
                 )
 
                 st.caption(
-                    "This is an estimate from the historical I-94 "
-                    "model, not a prediction for the route planner."
+                    "This is an estimate from the historical I-94 model, "
+                    "not a prediction for the route planner."
                 )
 
             st.subheader("Historical Dataset Overview")
 
             a, b, c = st.columns(3)
 
-            a.metric(
-                "Historical Records",
-                f"{len(df):,}",
-            )
-
+            a.metric("Historical Records", f"{len(df):,}")
             b.metric(
                 "Average Volume",
                 f"{df['traffic_volume'].mean():,.0f}",
             )
-
             c.metric(
                 "Maximum Recorded Volume",
                 f"{df['traffic_volume'].max():,.0f}",
             )
 
             with st.expander("View sample dataset rows"):
-
                 st.dataframe(
-                    df[
-                        ["date_time", "traffic_volume"]
-                    ].head(20),
+                    df[["date_time", "traffic_volume"]].head(20),
                     use_container_width=True,
                     hide_index=True,
                 )
 
     except Exception as error:
-
         st.error(
-            "Historical ML demo could not load. "
-            "Check the saved model and dataset files."
+            "Historical ML demo could not load. Check that "
+            "model/traffic_model.pkl has been generated locally "
+            "by train_model.py."
         )
-
         st.caption(str(error))
 
 
-# =====================================================
 # ABOUT PROJECT
-# =====================================================
-
 elif page == "About Project":
-
     show_hero(
         "About TrafficAI",
         "A route-planning and traffic-analysis mini project.",
     )
 
     st.subheader("Problem Statement")
-
     st.write(
-        "Travellers need an accessible way to search for "
-        "locations, calculate driving routes, and review "
-        "traffic-aware journey estimates."
+        "Travellers need an accessible way to search for locations, "
+        "calculate road routes, and review travel-time and traffic estimates."
     )
 
     st.subheader("Main Features")
-
     st.write(
         "- Starting location and destination search\n"
         "- Exact-place selection to reduce location mismatches\n"
-        "- Driving route calculation\n"
+        "- Car, motorcycle, and bus road-route calculation\n"
         "- Distance and estimated travel time\n"
         "- Traffic-delay information when returned by the API\n"
         "- Interactive map and recent route checks\n"
@@ -1160,28 +1095,26 @@ elif page == "About Project":
     st.subheader("Technology Stack")
 
     a, b, c = st.columns(3)
-
     a.markdown("### Python")
     a.write("Application logic and API requests")
-
     b.markdown("### Streamlit")
     b.write("Interactive multi-page web dashboard")
-
     c.markdown("### TomTom")
     c.write("Location search and traffic-aware route calculation")
 
     st.subheader("Important Project Limitations")
 
     st.write(
-        "The route planner uses TomTom-provided route and traffic "
-        "estimates. Results depend on the provider's current coverage "
-        "and response. They are estimates, not guarantees."
+        "TomTom provides road-route and traffic estimates. Motorcycle and "
+        "bus modes are beta functionality and may not be available for every "
+        "route. Bus mode does not provide public bus numbers, stops, or "
+        "schedules. Results depend on provider coverage and are estimates, "
+        "not guarantees."
     )
 
     st.write(
         "The separate Random Forest demonstration uses historical "
-        "US I-94 traffic data; it is not used to calculate Chennai "
-        "route traffic."
+        "US I-94 traffic data; it is not used to calculate Chennai route traffic."
     )
 
     st.markdown(
@@ -1197,12 +1130,8 @@ elif page == "About Project":
     )
 
 
-# =====================================================
 # FOOTER
-# =====================================================
-
 st.divider()
-
 st.caption(
     "TrafficAI | Route Traffic Intelligence | "
     "Estimates depend on available provider data."
